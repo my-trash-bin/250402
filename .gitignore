@@ -1,0 +1,6 @@
+/.zig-cache
+/zig-out
+/.cache
+/builddirs
+/deps
+/compile_commands.json

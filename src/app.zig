@@ -13,7 +13,9 @@ pub const App = struct {
     instance: vk.VkInstance,
     validation: AppValidation,
     physicalDevice: vk.VkPhysicalDevice,
-    queueFamilyIndexGraphics: usize,
+    queueFamilyIndexGraphics: u32,
+    device: vk.VkDevice,
+    graphicsQueue: vk.VkQueue,
 
     pub const CreationError = error{
         OutOfMemory,
@@ -24,6 +26,8 @@ pub const App = struct {
         Call_vkCreateInstance,
         Call_vkEnumerateInstanceLayerProperties,
         Call_vkEnumeratePhysicalDevices,
+        Call_vkCreateDevice,
+        Etc,
     };
 
     const validation_enabled = builtin.mode == .Debug;
@@ -75,13 +79,7 @@ pub const App = struct {
         }
 
         fn debug_callback(messageSeverity: vk.VkDebugUtilsMessageSeverityFlagBitsEXT, messageType: vk.VkDebugUtilsMessageTypeFlagsEXT, pCallbackData: [*c]const vk.VkDebugUtilsMessengerCallbackDataEXT, pUserData: ?*anyopaque) callconv(.C) vk.VkBool32 {
-            const Severity = enum {
-                ERROR,
-                WARNING,
-                INFO,
-                VERBOSE,
-                OTHER,
-            };
+            const Severity = enum { ERROR, WARNING, INFO, VERBOSE, OTHER };
             const severity = if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) Severity.ERROR else if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) Severity.WARNING else if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) Severity.INFO else if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) Severity.VERBOSE else Severity.OTHER;
             const Type = enum { GENERAL, VALIDATION, PERFORMANCE, OTHER };
             const rType = if (messageType == vk.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) Type.GENERAL else if (messageType == vk.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) Type.VALIDATION else if (messageType == vk.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) Type.PERFORMANCE else Type.OTHER;
@@ -115,8 +113,18 @@ pub const App = struct {
         const validation = try AppValidation.create(allocator, instance);
         errdefer validation.destroy(instance);
         const physicalDevice = try pickPhysicalDevice(allocator, instance);
-        const queueFamilyIndexGraphics = (try findQueueFamilies(allocator, physicalDevice)).?;
-        return .{ .instance = instance, .validation = validation, .physicalDevice = physicalDevice, .queueFamilyIndexGraphics = queueFamilyIndexGraphics };
+        const queueFamilyIndexGraphics = (try findQueueFamilies(allocator, physicalDevice)) orelse return CreationError.Etc;
+        const device = try createLogicalDevice(physicalDevice, queueFamilyIndexGraphics);
+        var graphicsQueue: vk.VkQueue = undefined;
+        vk.vkGetDeviceQueue(device, queueFamilyIndexGraphics, 0, &graphicsQueue);
+        return .{
+            .instance = instance,
+            .validation = validation,
+            .physicalDevice = physicalDevice,
+            .queueFamilyIndexGraphics = queueFamilyIndexGraphics,
+            .device = device,
+            .graphicsQueue = graphicsQueue,
+        };
     }
 
     fn createInstance(allocator: std.mem.Allocator) CreationError!vk.VkInstance {
@@ -205,7 +213,7 @@ pub const App = struct {
         return true;
     }
 
-    fn findQueueFamilies(allocator: std.mem.Allocator, device: vk.VkPhysicalDevice) CreationError!?usize {
+    fn findQueueFamilies(allocator: std.mem.Allocator, device: vk.VkPhysicalDevice) CreationError!?u32 {
         var queueFamilyCount: u32 = undefined;
         vk.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
         const queueFamilies = try allocator.alloc(vk.VkQueueFamilyProperties, queueFamilyCount);
@@ -213,13 +221,43 @@ pub const App = struct {
         vk.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
         for (queueFamilies, 0..) |queueFamily, i| {
             if (queueFamily.queueFlags & vk.VK_QUEUE_GRAPHICS_BIT == vk.VK_QUEUE_GRAPHICS_BIT) {
-                return i;
+                return @intCast(i);
             }
         }
         return null;
     }
 
+    fn createLogicalDevice(physicalDevice: vk.VkPhysicalDevice, queueFamilyIndexGraphics: u32) CreationError!vk.VkDevice {
+        const queueCreateInfo: vk.VkDeviceQueueCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .queueFamilyIndex = queueFamilyIndexGraphics,
+            .queueCount = 1,
+            .pQueuePriorities = &@as(f32, 1.0),
+        };
+        const deviceFeatures: vk.VkPhysicalDeviceFeatures = .{};
+        const deviceCreateInfo: vk.VkDeviceCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .queueCreateInfoCount = 1,
+            .pQueueCreateInfos = &queueCreateInfo,
+            .enabledLayerCount = if (validation_enabled) 1 else 0,
+            .ppEnabledLayerNames = if (validation_enabled) &[_][*c]const u8{validation_layer_name} else null,
+            .enabledExtensionCount = 0,
+            .ppEnabledExtensionNames = null,
+            .pEnabledFeatures = &deviceFeatures,
+        };
+        var result: vk.VkDevice = undefined;
+        if (vk.vkCreateDevice(physicalDevice, &deviceCreateInfo, null, &result) != vk.VK_SUCCESS) {
+            return CreationError.Call_vkCreateDevice;
+        }
+        return result;
+    }
+
     pub fn destroy(self: App) void {
+        vk.vkDestroyDevice(self.device, null);
         self.validation.destroy(self.instance);
         vk.vkDestroyInstance(self.instance, null);
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
@@ -49,8 +50,13 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(glfw.path("include"));
     lib.linkLibrary(glfw.artifact("glfw"));
     exe.linkLibrary(glfw.artifact("glfw"));
-    lib.linkSystemLibrary("vulkan");
-    exe.linkSystemLibrary("vulkan");
+    lib.linkSystemLibrary(if (builtin.target.os.tag == .windows) "vulkan-1" else "vulkan");
+    exe.linkSystemLibrary(if (builtin.target.os.tag == .windows) "vulkan-1" else "vulkan");
+    if (std.process.hasEnvVar(b.allocator, "VULKAN_SDK") catch unreachable) {
+        const libraryPath = b.pathJoin(&.{ std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch unreachable, "Lib" });
+        lib.addLibraryPath(.{ .src_path = .{ .owner = b, .sub_path = libraryPath } });
+        exe.addLibraryPath(.{ .src_path = .{ .owner = b, .sub_path = libraryPath } });
+    }
 
     //
     // MANUAL END

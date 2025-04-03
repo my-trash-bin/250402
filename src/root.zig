@@ -1,7 +1,3 @@
-const glad = @cImport({
-    @cDefine("GLAD_GL_IMPLEMENTATION", {});
-    @cInclude("glad/gl.h");
-});
 const glfw = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", {});
     @cInclude("GLFW/glfw3.h");

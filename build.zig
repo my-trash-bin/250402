@@ -45,14 +45,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    lib.addIncludePath(glfw.path("include"));
+    exe.addIncludePath(glfw.path("include"));
     exe.linkLibrary(glfw.artifact("glfw"));
-
-    lib.addIncludePath(.{ .src_path = .{ .owner = b, .sub_path = "submodules/glfw/include" } });
-    lib.addIncludePath(.{ .src_path = .{ .owner = b, .sub_path = "submodules/glfw/deps" } });
-    lib.linkLibC();
-    exe.addIncludePath(.{ .src_path = .{ .owner = b, .sub_path = "submodules/glfw/include" } });
-    exe.addIncludePath(.{ .src_path = .{ .owner = b, .sub_path = "submodules/glfw/deps" } });
-    exe.linkLibC();
 
     //
     // MANUAL END

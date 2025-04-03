@@ -12,13 +12,18 @@ const builtin = @import("builtin");
 pub const App = struct {
     instance: vk.VkInstance,
     validation: AppValidation,
+    physicalDevice: vk.VkPhysicalDevice,
+    queueFamilyIndexGraphics: usize,
 
     pub const CreationError = error{
         OutOfMemory,
         UnsupportedLayer,
         DebugMessengerSetupFailure,
+        NoAvailableDevice,
+        NoSuitableDevice,
         Call_vkCreateInstance,
         Call_vkEnumerateInstanceLayerProperties,
+        Call_vkEnumeratePhysicalDevices,
     };
 
     const validation_enabled = builtin.mode == .Debug;
@@ -105,6 +110,16 @@ pub const App = struct {
     };
 
     pub fn create(allocator: std.mem.Allocator) CreationError!App {
+        const instance = try createInstance(allocator);
+        errdefer vk.vkDestroyInstance(instance, null);
+        const validation = try AppValidation.create(allocator, instance);
+        errdefer validation.destroy(instance);
+        const physicalDevice = try pickPhysicalDevice(allocator, instance);
+        const queueFamilyIndexGraphics = (try findQueueFamilies(allocator, physicalDevice)).?;
+        return .{ .instance = instance, .validation = validation, .physicalDevice = physicalDevice, .queueFamilyIndexGraphics = queueFamilyIndexGraphics };
+    }
+
+    fn createInstance(allocator: std.mem.Allocator) CreationError!vk.VkInstance {
         const applicationInfo: vk.VkApplicationInfo = .{
             .sType = vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pNext = null,
@@ -146,10 +161,62 @@ pub const App = struct {
         if (vk.vkCreateInstance(&instanceCreateInfo, null, &instance) != vk.VK_SUCCESS) {
             return CreationError.Call_vkCreateInstance;
         }
-        errdefer vk.vkDestroyInstance(instance, null);
-        const validation = try AppValidation.create(allocator, instance);
-        errdefer validation.destroy(instance);
-        return .{ .instance = instance, .validation = validation };
+        return instance;
+    }
+
+    fn pickPhysicalDevice(allocator: std.mem.Allocator, instance: vk.VkInstance) CreationError!vk.VkPhysicalDevice {
+        var deviceCount: u32 = undefined;
+        if (vk.vkEnumeratePhysicalDevices(instance, &deviceCount, null) != vk.VK_SUCCESS) {
+            return CreationError.Call_vkEnumeratePhysicalDevices;
+        }
+        if (deviceCount == 0) {
+            return CreationError.NoAvailableDevice;
+        }
+        const devices = try allocator.alloc(vk.VkPhysicalDevice, deviceCount);
+        defer allocator.free(devices);
+        if (vk.vkEnumeratePhysicalDevices(instance, &deviceCount, devices.ptr) != vk.VK_SUCCESS) {
+            return CreationError.Call_vkEnumeratePhysicalDevices;
+        }
+        for (devices) |device| {
+            if (try isSuitable(allocator, device)) {
+                return device;
+            }
+        }
+        return CreationError.NoSuitableDevice;
+    }
+
+    fn isSuitable(allocator: std.mem.Allocator, device: vk.VkPhysicalDevice) CreationError!bool {
+        var properties: vk.VkPhysicalDeviceProperties = undefined;
+        vk.vkGetPhysicalDeviceProperties(device, &properties);
+        if (properties.deviceType != vk.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU and properties.deviceType != vk.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+            return false;
+        }
+
+        var features: vk.VkPhysicalDeviceFeatures = undefined;
+        vk.vkGetPhysicalDeviceFeatures(device, &features);
+        if (features.geometryShader != vk.VK_TRUE) {
+            return false;
+        }
+
+        if (try findQueueFamilies(allocator, device) == null) {
+            return false;
+        }
+
+        return true;
+    }
+
+    fn findQueueFamilies(allocator: std.mem.Allocator, device: vk.VkPhysicalDevice) CreationError!?usize {
+        var queueFamilyCount: u32 = undefined;
+        vk.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
+        const queueFamilies = try allocator.alloc(vk.VkQueueFamilyProperties, queueFamilyCount);
+        defer allocator.free(queueFamilies);
+        vk.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
+        for (queueFamilies, 0..) |queueFamily, i| {
+            if (queueFamily.queueFlags & vk.VK_QUEUE_GRAPHICS_BIT == vk.VK_QUEUE_GRAPHICS_BIT) {
+                return i;
+            }
+        }
+        return null;
     }
 
     pub fn destroy(self: App) void {

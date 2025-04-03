@@ -47,7 +47,10 @@ pub fn build(b: *std.Build) void {
 
     lib.addIncludePath(glfw.path("include"));
     exe.addIncludePath(glfw.path("include"));
+    lib.linkLibrary(glfw.artifact("glfw"));
     exe.linkLibrary(glfw.artifact("glfw"));
+    lib.linkSystemLibrary("vulkan");
+    exe.linkSystemLibrary("vulkan");
 
     //
     // MANUAL END

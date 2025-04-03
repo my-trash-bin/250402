@@ -2,10 +2,11 @@ const glfw = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", {});
     @cInclude("GLFW/glfw3.h");
 });
+const App = @import("app.zig");
 const std = @import("std");
 
 fn error_callback(err: c_int, description: [*c]const u8) callconv(.C) void {
-    std.debug.print("[{}] {s}", .{ err, description });
+    std.debug.print("[{}] {s}\n", .{ err, description });
 }
 
 fn key_callback(window: ?*glfw.GLFWwindow, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.C) void {
@@ -17,6 +18,10 @@ fn key_callback(window: ?*glfw.GLFWwindow, key: c_int, scancode: c_int, action: 
 }
 
 pub export fn app_entry() callconv(.C) void {
+    actual_entry() catch |err| std.debug.print("ERROR: {}\n", .{err});
+}
+
+fn actual_entry() anyerror!void {
     _ = glfw.glfwSetErrorCallback(error_callback);
 
     if (glfw.glfwInit() == 0) {
@@ -34,6 +39,10 @@ pub export fn app_entry() callconv(.C) void {
 
     glfw.glfwMakeContextCurrent(window);
     glfw.glfwSwapInterval(1);
+
+    const allocator = std.heap.page_allocator;
+    const app = try App.App.create(allocator);
+    defer app.destroy();
 
     while (glfw.glfwWindowShouldClose(window) == 0) {
         var width: c_int = undefined;

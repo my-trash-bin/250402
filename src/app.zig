@@ -30,6 +30,7 @@ pub const App = struct {
         Etc,
     };
 
+    const is_macos = builtin.target.os.tag == .macos;
     const validation_enabled = builtin.mode == .Debug;
     const validation_layer_name = "VK_LAYER_KHRONOS_validation";
 
@@ -83,7 +84,7 @@ pub const App = struct {
             const severity = if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) Severity.ERROR else if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) Severity.WARNING else if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) Severity.INFO else if (messageSeverity == vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) Severity.VERBOSE else Severity.OTHER;
             const Type = enum { GENERAL, VALIDATION, PERFORMANCE, OTHER };
             const rType = if (messageType == vk.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) Type.GENERAL else if (messageType == vk.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) Type.VALIDATION else if (messageType == vk.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) Type.PERFORMANCE else Type.OTHER;
-            std.debug.print("[{}][{}] {s}\n", .{ severity, rType, pCallbackData.*.pMessage });
+            std.debug.print("[{s}][{s}] {s}\n", .{ @tagName(severity), @tagName(rType), pCallbackData.*.pMessage });
             _ = pUserData;
             return vk.VK_FALSE;
         }
@@ -139,7 +140,6 @@ pub const App = struct {
         };
         var requiredExtensionsCount: u32 = undefined;
         const requiredExtensionNames = glfw.glfwGetRequiredInstanceExtensions(&requiredExtensionsCount);
-        const is_macos = comptime builtin.target.os.tag == .macos;
         var enabledLayerNames = std.ArrayList([*c]const u8).init(allocator);
         defer enabledLayerNames.deinit();
         var enabledExtensionNames = std.ArrayList([*c]const u8).init(allocator);
@@ -200,11 +200,11 @@ pub const App = struct {
             return false;
         }
 
-        var features: vk.VkPhysicalDeviceFeatures = undefined;
-        vk.vkGetPhysicalDeviceFeatures(device, &features);
-        if (features.geometryShader != vk.VK_TRUE) {
-            return false;
-        }
+        // var features: vk.VkPhysicalDeviceFeatures = undefined;
+        // vk.vkGetPhysicalDeviceFeatures(device, &features);
+        // if (features.geometryShader != vk.VK_TRUE) {
+        //     return false;
+        // }
 
         if (try findQueueFamilies(allocator, device) == null) {
             return false;
@@ -245,8 +245,8 @@ pub const App = struct {
             .pQueueCreateInfos = &queueCreateInfo,
             .enabledLayerCount = if (validation_enabled) 1 else 0,
             .ppEnabledLayerNames = if (validation_enabled) &[_][*c]const u8{validation_layer_name} else null,
-            .enabledExtensionCount = 0,
-            .ppEnabledExtensionNames = null,
+            .enabledExtensionCount = if (is_macos) 1 else 0,
+            .ppEnabledExtensionNames = if (is_macos) &[_][*c]const u8{"VK_KHR_portability_subset"} else null,
             .pEnabledFeatures = &deviceFeatures,
         };
         var result: vk.VkDevice = undefined;

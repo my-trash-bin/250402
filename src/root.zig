@@ -1,7 +1,3 @@
-const glfw = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", {});
-    @cInclude("GLFW/glfw3.h");
-});
 const App = @import("app.zig");
 const std = @import("std");
 
@@ -9,9 +5,9 @@ fn error_callback(err: c_int, description: [*c]const u8) callconv(.C) void {
     std.debug.print("[{}] {s}\n", .{ err, description });
 }
 
-fn key_callback(window: ?*glfw.GLFWwindow, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.C) void {
-    if (key == glfw.GLFW_KEY_ESCAPE and action == glfw.GLFW_PRESS) {
-        glfw.glfwSetWindowShouldClose(window, glfw.GLFW_TRUE);
+fn key_callback(window: ?*App.c.GLFWwindow, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.C) void {
+    if (key == App.c.GLFW_KEY_ESCAPE and action == App.c.GLFW_PRESS) {
+        App.c.glfwSetWindowShouldClose(window, App.c.GLFW_TRUE);
     }
     _ = scancode;
     _ = mods;
@@ -22,34 +18,40 @@ pub export fn app_entry() callconv(.C) void {
 }
 
 fn actual_entry() anyerror!void {
-    _ = glfw.glfwSetErrorCallback(error_callback);
+    _ = App.c.glfwSetErrorCallback(error_callback);
 
-    if (glfw.glfwInit() == 0) {
+    if (App.c.glfwInit() == 0) {
         std.process.exit(1);
     }
-    defer glfw.glfwTerminate();
+    defer App.c.glfwTerminate();
 
-    const window = glfw.glfwCreateWindow(640, 480, "test", null, null);
+    if (App.c.glfwVulkanSupported() != App.c.GLFW_TRUE) {
+        return anyerror.VulkanNotSupported;
+    }
+
+    App.c.glfwWindowHint(App.c.GLFW_CLIENT_API, App.c.GLFW_NO_API);
+
+    const window = App.c.glfwCreateWindow(640, 480, "test", null, null);
     if (window == null) {
         std.process.exit(1);
     }
-    defer glfw.glfwDestroyWindow(window);
+    defer App.c.glfwDestroyWindow(window);
 
-    _ = glfw.glfwSetKeyCallback(window, key_callback);
+    _ = App.c.glfwSetKeyCallback(window, key_callback);
 
-    glfw.glfwMakeContextCurrent(window);
-    glfw.glfwSwapInterval(1);
+    App.c.glfwMakeContextCurrent(window);
+    App.c.glfwSwapInterval(1);
 
     const allocator = std.heap.page_allocator;
-    const app = try App.App.create(allocator);
+    const app = try App.App.create(allocator, window);
     defer app.destroy();
 
-    while (glfw.glfwWindowShouldClose(window) == 0) {
+    while (App.c.glfwWindowShouldClose(window) == 0) {
         var width: c_int = undefined;
         var height: c_int = undefined;
-        glfw.glfwGetFramebufferSize(window, &width, &height);
+        App.c.glfwGetFramebufferSize(window, &width, &height);
 
-        glfw.glfwSwapBuffers(window);
-        glfw.glfwPollEvents();
+        // App.c.glfwSwapBuffers(window);
+        App.c.glfwPollEvents();
     }
 }

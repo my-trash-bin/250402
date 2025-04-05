@@ -12,8 +12,13 @@ pub const App = struct {
     surface: c.VkSurfaceKHR,
     physicalDevice: c.VkPhysicalDevice,
     device: c.VkDevice,
+    swapChain: c.VkSwapchainKHR,
+    swapChainImages: []c.VkImage,
+    swapChainImageFormat: c.VkFormat,
+    swapChainExtent: c.VkExtent2D,
     graphicsQueue: c.VkQueue,
     presentQueue: c.VkQueue,
+    allocator: std.mem.Allocator,
 
     pub const CreationError = error{
         OutOfMemory,
@@ -27,11 +32,20 @@ pub const App = struct {
         Call_vkCreateDevice,
         Call_glfwCreateWindowSurface,
         Call_vkGetPhysicalDeviceSurfaceSupportKHR,
+        Call_vkEnumerateDeviceExtensionProperties,
+        Call_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
+        Call_vkGetPhysicalDeviceSurfaceFormatsKHR,
+        Call_vkGetPhysicalDeviceSurfacePresentModesKHR,
+        Call_vkCreateSwapchainKHR,
+        Call_vkGetSwapchainImagesKHR,
     };
 
     const is_macos = builtin.target.os.tag == .macos;
     const validation_enabled = builtin.mode == .Debug;
     const validation_layer_name = "VK_LAYER_KHRONOS_validation";
+    const required_extensions = [_][*c]const u8{
+        c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
 
     const AppValidation = if (validation_enabled) struct {
         messenger: c.VkDebugUtilsMessengerEXT,
@@ -113,6 +127,10 @@ pub const App = struct {
         errdefer c.vkDestroySurfaceKHR(instance, surface, null);
         const physicalDevice = try pickPhysicalDevice(allocator, instance, surface);
         const device = try createLogicalDevice(allocator, physicalDevice);
+        errdefer c.vkDestroyDevice(device, null);
+        const swapChainSupportDetails = try SwapChainSupportDetails.create(allocator, physicalDevice.device, surface);
+        defer swapChainSupportDetails.destroy();
+        const swapChain = try createSwapChain(allocator, window, device, surface, &swapChainSupportDetails, physicalDevice.indices);
         var graphicsQueue: c.VkQueue = undefined;
         c.vkGetDeviceQueue(device, physicalDevice.indices.graphics, 0, &graphicsQueue);
         var presentQueue: c.VkQueue = undefined;
@@ -123,8 +141,13 @@ pub const App = struct {
             .surface = surface,
             .physicalDevice = physicalDevice.device,
             .device = device,
+            .swapChain = swapChain.swapChain,
+            .swapChainImages = swapChain.swapChainImages,
+            .swapChainImageFormat = swapChain.swapChainImageFormat,
+            .swapChainExtent = swapChain.swapChainExtent,
             .graphicsQueue = graphicsQueue,
             .presentQueue = presentQueue,
+            .allocator = allocator,
         };
     }
 
@@ -180,6 +203,47 @@ pub const App = struct {
 
     const QueueFamilyIndices = struct { graphics: u32, present: u32 };
     const PickPhysicalDeviceResult = struct { device: c.VkPhysicalDevice, indices: QueueFamilyIndices };
+    const CreateSwapChainResult = struct { swapChain: c.VkSwapchainKHR, swapChainImages: []c.VkImage, swapChainImageFormat: c.VkFormat, swapChainExtent: c.VkExtent2D };
+    const SwapChainSupportDetails = struct {
+        allocator: std.mem.Allocator,
+        capabilities: c.VkSurfaceCapabilitiesKHR,
+        formats: []c.VkSurfaceFormatKHR,
+        presentModes: []c.VkPresentModeKHR,
+
+        fn create(allocator: std.mem.Allocator, device: c.VkPhysicalDevice, surface: c.VkSurfaceKHR) CreationError!SwapChainSupportDetails {
+            var capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
+            if (c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &capabilities) != c.VK_SUCCESS) {
+                return CreationError.Call_vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+            }
+
+            var formatCount: u32 = undefined;
+            if (c.vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, null) != c.VK_SUCCESS) {
+                return CreationError.Call_vkGetPhysicalDeviceSurfaceFormatsKHR;
+            }
+            const formats = try allocator.alloc(c.VkSurfaceFormatKHR, formatCount);
+            errdefer allocator.free(formats);
+            if (c.vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, formats.ptr) != c.VK_SUCCESS) {
+                return CreationError.Call_vkGetPhysicalDeviceSurfaceFormatsKHR;
+            }
+
+            var presentModeCount: u32 = undefined;
+            if (c.vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, null) != c.VK_SUCCESS) {
+                return CreationError.Call_vkGetPhysicalDeviceSurfacePresentModesKHR;
+            }
+            const presentModes = try allocator.alloc(c.VkPresentModeKHR, presentModeCount);
+            errdefer allocator.free(presentModes);
+            if (c.vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, presentModes.ptr) != c.VK_SUCCESS) {
+                return CreationError.Call_vkGetPhysicalDeviceSurfacePresentModesKHR;
+            }
+
+            return .{ .allocator = allocator, .capabilities = capabilities, .formats = formats, .presentModes = presentModes };
+        }
+
+        fn destroy(self: SwapChainSupportDetails) void {
+            self.allocator.free(self.formats);
+            self.allocator.free(self.presentModes);
+        }
+    };
 
     fn pickPhysicalDevice(allocator: std.mem.Allocator, instance: c.VkInstance, surface: c.VkSurfaceKHR) CreationError!PickPhysicalDeviceResult {
         var deviceCount: u32 = undefined;
@@ -197,13 +261,13 @@ pub const App = struct {
         for (devices) |device| {
             return .{
                 .device = device,
-                .indices = (try isSuitable(allocator, device, surface)) orelse continue,
+                .indices = (try isPhysicalDeviceSuitable(allocator, device, surface)) orelse continue,
             };
         }
         return CreationError.NoSuitableDevice;
     }
 
-    fn isSuitable(allocator: std.mem.Allocator, device: c.VkPhysicalDevice, surface: c.VkSurfaceKHR) CreationError!?QueueFamilyIndices {
+    fn isPhysicalDeviceSuitable(allocator: std.mem.Allocator, device: c.VkPhysicalDevice, surface: c.VkSurfaceKHR) CreationError!?QueueFamilyIndices {
         var properties: c.VkPhysicalDeviceProperties = undefined;
         c.vkGetPhysicalDeviceProperties(device, &properties);
         if (properties.deviceType != c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU and properties.deviceType != c.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
@@ -215,6 +279,17 @@ pub const App = struct {
         // if (features.geometryShader != c.VK_TRUE) {
         //     return null;
         // }
+
+        if (!try checkPhysicalDeviceExtensionSupport(allocator, device)) {
+            return null;
+        }
+
+        const swapChainSupportDetails = try SwapChainSupportDetails.create(allocator, device, surface);
+        defer swapChainSupportDetails.destroy();
+
+        if (swapChainSupportDetails.formats.len == 0 or swapChainSupportDetails.presentModes.len == 0) {
+            return null;
+        }
 
         var queueFamilyCount: u32 = undefined;
         c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
@@ -247,6 +322,112 @@ pub const App = struct {
         return .{ .graphics = graphics, .present = present };
     }
 
+    fn checkPhysicalDeviceExtensionSupport(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) CreationError!bool {
+        var propertyCount: u32 = undefined;
+        if (c.vkEnumerateDeviceExtensionProperties(device, null, &propertyCount, null) != c.VK_SUCCESS) {
+            return CreationError.Call_vkEnumerateDeviceExtensionProperties;
+        }
+        const properties = try allocator.alloc(c.VkExtensionProperties, propertyCount);
+        defer allocator.free(properties);
+        if (c.vkEnumerateDeviceExtensionProperties(device, null, &propertyCount, properties.ptr) != c.VK_SUCCESS) {
+            return CreationError.Call_vkEnumerateDeviceExtensionProperties;
+        }
+
+        for (required_extensions) |required_extension| {
+            blk: {
+                for (properties) |property| {
+                    if (cstring.strcmp(@ptrCast(&property.extensionName), required_extension) == 0) {
+                        break :blk;
+                    }
+                }
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn chooseSwapSurfaceFormat(availableFormats: []c.VkSurfaceFormatKHR) c.VkSurfaceFormatKHR {
+        for (availableFormats) |availableFormat| {
+            if (availableFormat.format == c.VK_FORMAT_B8G8R8A8_SRGB and availableFormat.colorSpace == c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                return availableFormat;
+            }
+        }
+
+        return availableFormats[0];
+    }
+
+    fn chooseSwapPresentMode(availablePresentModes: []c.VkPresentModeKHR) c.VkPresentModeKHR {
+        for (availablePresentModes) |availablePresentMode| {
+            if (availablePresentMode == c.VK_PRESENT_MODE_MAILBOX_KHR) {
+                return availablePresentMode;
+            }
+        }
+
+        return c.VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    fn chooseSwapExtent(window: ?*c.GLFWwindow, capabilities: *const c.VkSurfaceCapabilitiesKHR) c.VkExtent2D {
+        if (capabilities.currentExtent.width != 4294967295) {
+            return capabilities.currentExtent;
+        } else {
+            var width: c_int = undefined;
+            var height: c_int = undefined;
+            c.glfwGetFramebufferSize(window, &width, &height);
+            return .{
+                .width = @min(capabilities.maxImageExtent.width, @max(capabilities.minImageExtent.width, @as(u32, @intCast(width)))),
+                .height = @min(capabilities.maxImageExtent.height, @max(capabilities.minImageExtent.height, @as(u32, @intCast(height)))),
+            };
+        }
+    }
+
+    fn createSwapChain(allocator: std.mem.Allocator, window: ?*c.GLFWwindow, device: c.VkDevice, surface: c.VkSurfaceKHR, swapChainSupportDetails: *const SwapChainSupportDetails, indices: QueueFamilyIndices) CreationError!CreateSwapChainResult {
+        const surfaceFormat = chooseSwapSurfaceFormat(swapChainSupportDetails.formats);
+        const presentMode = chooseSwapPresentMode(swapChainSupportDetails.presentModes);
+        const extent = chooseSwapExtent(window, &swapChainSupportDetails.capabilities);
+        const imageCount = if (swapChainSupportDetails.capabilities.maxImageCount > 0 and swapChainSupportDetails.capabilities.minImageCount + 1 > swapChainSupportDetails.capabilities.maxImageCount) swapChainSupportDetails.capabilities.maxImageCount else swapChainSupportDetails.capabilities.minImageCount;
+
+        const createInfo: c.VkSwapchainCreateInfoKHR = .{
+            .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+            .surface = surface,
+            .minImageCount = imageCount,
+            .imageFormat = surfaceFormat.format,
+            .imageColorSpace = surfaceFormat.colorSpace,
+            .imageExtent = extent,
+            .imageArrayLayers = 1,
+            .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageSharingMode = if (indices.graphics != indices.present) c.VK_SHARING_MODE_CONCURRENT else c.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = if (indices.graphics != indices.present) 2 else 0,
+            .pQueueFamilyIndices = if (indices.graphics != indices.present) &[_]u32{ indices.graphics, indices.present } else null,
+            .preTransform = swapChainSupportDetails.capabilities.currentTransform,
+            .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+            .presentMode = presentMode,
+            .clipped = c.VK_TRUE,
+            .oldSwapchain = @ptrCast(c.VK_NULL_HANDLE),
+        };
+        var swapChain: c.VkSwapchainKHR = undefined;
+        if (c.vkCreateSwapchainKHR(device, &createInfo, null, &swapChain) != c.VK_SUCCESS) {
+            return CreationError.Call_vkCreateSwapchainKHR;
+        }
+        errdefer c.vkDestroySwapchainKHR(device, swapChain, null);
+
+        var swapChainImageCount: u32 = undefined;
+        if (c.vkGetSwapchainImagesKHR(device, swapChain, &swapChainImageCount, null) != c.VK_SUCCESS) {
+            return CreationError.Call_vkGetSwapchainImagesKHR;
+        }
+        const swapChainImages = try allocator.alloc(c.VkImage, swapChainImageCount);
+        errdefer allocator.free(swapChainImages);
+        if (c.vkGetSwapchainImagesKHR(device, swapChain, &swapChainImageCount, swapChainImages.ptr) != c.VK_SUCCESS) {
+            return CreationError.Call_vkGetSwapchainImagesKHR;
+        }
+
+        return .{
+            .swapChain = swapChain,
+            .swapChainImages = swapChainImages,
+            .swapChainImageFormat = surfaceFormat.format,
+            .swapChainExtent = extent,
+        };
+    }
+
     fn createLogicalDevice(allocator: std.mem.Allocator, physicalDevice: PickPhysicalDeviceResult) CreationError!c.VkDevice {
         var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(allocator);
         defer queueCreateInfos.deinit();
@@ -265,14 +446,22 @@ pub const App = struct {
                 });
             }
         }
+        var enabledExtensionNames = std.ArrayList([*]const u8).init(allocator);
+        defer enabledExtensionNames.deinit();
+        for (required_extensions) |required_extension| {
+            try enabledExtensionNames.append(required_extension);
+        }
+        if (is_macos) {
+            try enabledExtensionNames.append("VK_KHR_portability_subset");
+        }
         const deviceCreateInfo: c.VkDeviceCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             .queueCreateInfoCount = @intCast(queueCreateInfos.items.len),
             .pQueueCreateInfos = queueCreateInfos.items.ptr,
             .enabledLayerCount = if (validation_enabled) 1 else 0,
             .ppEnabledLayerNames = if (validation_enabled) &[_][*c]const u8{validation_layer_name} else null,
-            .enabledExtensionCount = if (is_macos) 1 else 0,
-            .ppEnabledExtensionNames = if (is_macos) &[_][*c]const u8{"VK_KHR_portability_subset"} else null,
+            .enabledExtensionCount = @intCast(enabledExtensionNames.items.len),
+            .ppEnabledExtensionNames = enabledExtensionNames.items.ptr,
             .pEnabledFeatures = &.{},
         };
         var result: c.VkDevice = undefined;
@@ -283,6 +472,8 @@ pub const App = struct {
     }
 
     pub fn destroy(self: App) void {
+        self.allocator.free(self.swapChainImages);
+        c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
         c.vkDestroyDevice(self.device, null);
         c.vkDestroySurfaceKHR(self.instance, self.surface, null);
         self.validation.destroy(self.instance);

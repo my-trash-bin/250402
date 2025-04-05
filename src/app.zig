@@ -16,6 +16,7 @@ pub const App = struct {
     swapChainImages: []c.VkImage,
     swapChainImageFormat: c.VkFormat,
     swapChainExtent: c.VkExtent2D,
+    swapChainImageViews: []c.VkImageView,
     graphicsQueue: c.VkQueue,
     presentQueue: c.VkQueue,
     allocator: std.mem.Allocator,
@@ -38,6 +39,7 @@ pub const App = struct {
         Call_vkGetPhysicalDeviceSurfacePresentModesKHR,
         Call_vkCreateSwapchainKHR,
         Call_vkGetSwapchainImagesKHR,
+        Call_vkCreateImageView,
     };
 
     const is_macos = builtin.target.os.tag == .macos;
@@ -131,6 +133,9 @@ pub const App = struct {
         const swapChainSupportDetails = try SwapChainSupportDetails.create(allocator, physicalDevice.device, surface);
         defer swapChainSupportDetails.destroy();
         const swapChain = try createSwapChain(allocator, window, device, surface, &swapChainSupportDetails, physicalDevice.indices);
+        errdefer c.vkDestroySwapchainKHR(device, swapChain.swapChain, null);
+        errdefer allocator.free(swapChain.swapChainImages);
+        const swapChainImageViews = try createSwapChainImageViews(allocator, device, &swapChain);
         var graphicsQueue: c.VkQueue = undefined;
         c.vkGetDeviceQueue(device, physicalDevice.indices.graphics, 0, &graphicsQueue);
         var presentQueue: c.VkQueue = undefined;
@@ -145,6 +150,7 @@ pub const App = struct {
             .swapChainImages = swapChain.swapChainImages,
             .swapChainImageFormat = swapChain.swapChainImageFormat,
             .swapChainExtent = swapChain.swapChainExtent,
+            .swapChainImageViews = swapChainImageViews,
             .graphicsQueue = graphicsQueue,
             .presentQueue = presentQueue,
             .allocator = allocator,
@@ -428,6 +434,38 @@ pub const App = struct {
         };
     }
 
+    fn createSwapChainImageViews(allocator: std.mem.Allocator, device: c.VkDevice, swapChain: *const CreateSwapChainResult) CreationError![]c.VkImageView {
+        const result = try allocator.alloc(c.VkImageView, swapChain.swapChainImages.len);
+        errdefer allocator.free(result);
+        for (swapChain.swapChainImages, 0..) |image, i| {
+            const createInfo: c.VkImageViewCreateInfo = .{
+                .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .image = image,
+                .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+                .format = swapChain.swapChainImageFormat,
+                .components = .{
+                    .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .subresourceRange = .{
+                    .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+
+            if (c.vkCreateImageView(device, &createInfo, null, &result[i]) != c.VK_SUCCESS) {
+                return CreationError.Call_vkCreateImageView;
+            }
+            errdefer c.vkDestroyImageView(device, &result[i], null);
+        }
+        return result;
+    }
+
     fn createLogicalDevice(allocator: std.mem.Allocator, physicalDevice: PickPhysicalDeviceResult) CreationError!c.VkDevice {
         var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(allocator);
         defer queueCreateInfos.deinit();
@@ -472,6 +510,10 @@ pub const App = struct {
     }
 
     pub fn destroy(self: App) void {
+        for (self.swapChainImageViews) |view| {
+            c.vkDestroyImageView(self.device, view, null);
+        }
+        self.allocator.free(self.swapChainImageViews);
         self.allocator.free(self.swapChainImages);
         c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
         c.vkDestroyDevice(self.device, null);

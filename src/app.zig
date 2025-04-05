@@ -11,9 +11,9 @@ pub const App = struct {
     validation: AppValidation,
     surface: c.VkSurfaceKHR,
     physicalDevice: c.VkPhysicalDevice,
-    queueFamilyIndexGraphics: u32,
     device: c.VkDevice,
     graphicsQueue: c.VkQueue,
+    presentQueue: c.VkQueue,
 
     pub const CreationError = error{
         OutOfMemory,
@@ -26,7 +26,7 @@ pub const App = struct {
         Call_vkEnumeratePhysicalDevices,
         Call_vkCreateDevice,
         Call_glfwCreateWindowSurface,
-        Etc,
+        Call_vkGetPhysicalDeviceSurfaceSupportKHR,
     };
 
     const is_macos = builtin.target.os.tag == .macos;
@@ -42,12 +42,9 @@ pub const App = struct {
             }
             const createInfo: c.VkDebugUtilsMessengerCreateInfoEXT = .{
                 .sType = c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-                .pNext = null,
-                .flags = 0,
                 .messageSeverity = c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
                 .messageType = c.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
                 .pfnUserCallback = debug_callback,
-                .pUserData = null,
             };
             const func: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
             if (func == null) {
@@ -114,26 +111,26 @@ pub const App = struct {
         errdefer validation.destroy(instance);
         const surface = try createSurface(window, instance);
         errdefer c.vkDestroySurfaceKHR(instance, surface, null);
-        const physicalDevice = try pickPhysicalDevice(allocator, instance);
-        const queueFamilyIndexGraphics = (try findQueueFamilies(allocator, physicalDevice)) orelse return CreationError.Etc;
-        const device = try createLogicalDevice(physicalDevice, queueFamilyIndexGraphics);
+        const physicalDevice = try pickPhysicalDevice(allocator, instance, surface);
+        const device = try createLogicalDevice(allocator, physicalDevice);
         var graphicsQueue: c.VkQueue = undefined;
-        c.vkGetDeviceQueue(device, queueFamilyIndexGraphics, 0, &graphicsQueue);
+        c.vkGetDeviceQueue(device, physicalDevice.indices.graphics, 0, &graphicsQueue);
+        var presentQueue: c.VkQueue = undefined;
+        c.vkGetDeviceQueue(device, physicalDevice.indices.present, 0, &presentQueue);
         return .{
             .instance = instance,
             .validation = validation,
             .surface = surface,
-            .physicalDevice = physicalDevice,
-            .queueFamilyIndexGraphics = queueFamilyIndexGraphics,
+            .physicalDevice = physicalDevice.device,
             .device = device,
             .graphicsQueue = graphicsQueue,
+            .presentQueue = presentQueue,
         };
     }
 
     fn createInstance(allocator: std.mem.Allocator) CreationError!c.VkInstance {
         const applicationInfo: c.VkApplicationInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
-            .pNext = null,
             .pApplicationName = "app",
             .applicationVersion = c.VK_MAKE_VERSION(0, 1, 0),
             .pEngineName = "No Engine",
@@ -159,7 +156,6 @@ pub const App = struct {
         }
         const instanceCreateInfo: c.VkInstanceCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            .pNext = null,
             .flags = if (is_macos) c.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR else 0,
             .pApplicationInfo = &applicationInfo,
             .enabledLayerCount = @intCast(enabledLayerNames.items.len),
@@ -182,7 +178,10 @@ pub const App = struct {
         return result;
     }
 
-    fn pickPhysicalDevice(allocator: std.mem.Allocator, instance: c.VkInstance) CreationError!c.VkPhysicalDevice {
+    const QueueFamilyIndices = struct { graphics: u32, present: u32 };
+    const PickPhysicalDeviceResult = struct { device: c.VkPhysicalDevice, indices: QueueFamilyIndices };
+
+    fn pickPhysicalDevice(allocator: std.mem.Allocator, instance: c.VkInstance, surface: c.VkSurfaceKHR) CreationError!PickPhysicalDeviceResult {
         var deviceCount: u32 = undefined;
         if (c.vkEnumeratePhysicalDevices(instance, &deviceCount, null) != c.VK_SUCCESS) {
             return CreationError.Call_vkEnumeratePhysicalDevices;
@@ -196,71 +195,88 @@ pub const App = struct {
             return CreationError.Call_vkEnumeratePhysicalDevices;
         }
         for (devices) |device| {
-            if (try isSuitable(allocator, device)) {
-                return device;
-            }
+            return .{
+                .device = device,
+                .indices = (try isSuitable(allocator, device, surface)) orelse continue,
+            };
         }
         return CreationError.NoSuitableDevice;
     }
 
-    fn isSuitable(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) CreationError!bool {
+    fn isSuitable(allocator: std.mem.Allocator, device: c.VkPhysicalDevice, surface: c.VkSurfaceKHR) CreationError!?QueueFamilyIndices {
         var properties: c.VkPhysicalDeviceProperties = undefined;
         c.vkGetPhysicalDeviceProperties(device, &properties);
         if (properties.deviceType != c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU and properties.deviceType != c.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-            return false;
+            return null;
         }
 
         // var features: c.VkPhysicalDeviceFeatures = undefined;
         // c.vkGetPhysicalDeviceFeatures(device, &features);
         // if (features.geometryShader != c.VK_TRUE) {
-        //     return false;
+        //     return null;
         // }
 
-        if (try findQueueFamilies(allocator, device) == null) {
-            return false;
-        }
-
-        return true;
-    }
-
-    fn findQueueFamilies(allocator: std.mem.Allocator, device: c.VkPhysicalDevice) CreationError!?u32 {
         var queueFamilyCount: u32 = undefined;
         c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
         const queueFamilies = try allocator.alloc(c.VkQueueFamilyProperties, queueFamilyCount);
         defer allocator.free(queueFamilies);
         c.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
-        for (queueFamilies, 0..) |queueFamily, i| {
-            if (queueFamily.queueFlags & c.VK_QUEUE_GRAPHICS_BIT == c.VK_QUEUE_GRAPHICS_BIT) {
-                return @intCast(i);
+
+        const graphics: u32 = blk: {
+            for (queueFamilies, 0..) |queueFamily, i| {
+                if (queueFamily.queueFlags & c.VK_QUEUE_GRAPHICS_BIT == c.VK_QUEUE_GRAPHICS_BIT) {
+                    break :blk @as(u32, @intCast(i));
+                }
             }
-        }
-        return null;
+            return null;
+        };
+
+        const present: u32 = blk: {
+            for (queueFamilies, 0..) |_, i| {
+                var supported: c.VkBool32 = undefined;
+                if (c.vkGetPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface, &supported) != c.VK_SUCCESS) {
+                    return CreationError.Call_vkGetPhysicalDeviceSurfaceSupportKHR;
+                }
+                if (supported == c.VK_TRUE) {
+                    break :blk @as(u32, @intCast(i));
+                }
+            }
+            return null;
+        };
+
+        return .{ .graphics = graphics, .present = present };
     }
 
-    fn createLogicalDevice(physicalDevice: c.VkPhysicalDevice, queueFamilyIndexGraphics: u32) CreationError!c.VkDevice {
-        const queueCreateInfo: c.VkDeviceQueueCreateInfo = .{
-            .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .queueFamilyIndex = queueFamilyIndexGraphics,
-            .queueCount = 1,
-            .pQueuePriorities = &@as(f32, 1.0),
-        };
-        const deviceFeatures: c.VkPhysicalDeviceFeatures = .{};
+    fn createLogicalDevice(allocator: std.mem.Allocator, physicalDevice: PickPhysicalDeviceResult) CreationError!c.VkDevice {
+        var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(allocator);
+        defer queueCreateInfos.deinit();
+        for ([_]u32{ physicalDevice.indices.graphics, physicalDevice.indices.present }) |index| {
+            blk: {
+                for (queueCreateInfos.items) |queueCreateInfo| {
+                    if (queueCreateInfo.queueFamilyIndex == index) {
+                        break :blk;
+                    }
+                }
+                try queueCreateInfos.append(.{
+                    .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                    .queueFamilyIndex = index,
+                    .queueCount = 1,
+                    .pQueuePriorities = &@as(f32, 1.0),
+                });
+            }
+        }
         const deviceCreateInfo: c.VkDeviceCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = null,
-            .flags = 0,
-            .queueCreateInfoCount = 1,
-            .pQueueCreateInfos = &queueCreateInfo,
+            .queueCreateInfoCount = @intCast(queueCreateInfos.items.len),
+            .pQueueCreateInfos = queueCreateInfos.items.ptr,
             .enabledLayerCount = if (validation_enabled) 1 else 0,
             .ppEnabledLayerNames = if (validation_enabled) &[_][*c]const u8{validation_layer_name} else null,
             .enabledExtensionCount = if (is_macos) 1 else 0,
             .ppEnabledExtensionNames = if (is_macos) &[_][*c]const u8{"VK_KHR_portability_subset"} else null,
-            .pEnabledFeatures = &deviceFeatures,
+            .pEnabledFeatures = &.{},
         };
         var result: c.VkDevice = undefined;
-        if (c.vkCreateDevice(physicalDevice, &deviceCreateInfo, null, &result) != c.VK_SUCCESS) {
+        if (c.vkCreateDevice(physicalDevice.device, &deviceCreateInfo, null, &result) != c.VK_SUCCESS) {
             return CreationError.Call_vkCreateDevice;
         }
         return result;

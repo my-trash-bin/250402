@@ -435,9 +435,15 @@ pub const App = struct {
     }
 
     fn createSwapChainImageViews(allocator: std.mem.Allocator, device: c.VkDevice, swapChain: *const CreateSwapChainResult) CreationError![]c.VkImageView {
+        var initializedCount: usize = 0;
         const result = try allocator.alloc(c.VkImageView, swapChain.swapChainImages.len);
-        errdefer allocator.free(result);
-        for (swapChain.swapChainImages, 0..) |image, i| {
+        errdefer {
+            for (0..initializedCount) |i| {
+                c.vkDestroyImageView(device, result[i], null);
+            }
+            allocator.free(result);
+        }
+        for (swapChain.swapChainImages) |image| {
             const createInfo: c.VkImageViewCreateInfo = .{
                 .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                 .image = image,
@@ -458,10 +464,10 @@ pub const App = struct {
                 },
             };
 
-            if (c.vkCreateImageView(device, &createInfo, null, &result[i]) != c.VK_SUCCESS) {
+            if (c.vkCreateImageView(device, &createInfo, null, &result[initializedCount]) != c.VK_SUCCESS) {
                 return CreationError.Call_vkCreateImageView;
             }
-            errdefer c.vkDestroyImageView(device, &result[i], null);
+            initializedCount += 1;
         }
         return result;
     }

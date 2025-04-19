@@ -28,7 +28,7 @@
     .dependencies = .{
         .glfw = .{
             .url = "https://github.com/my-organization-for-forks/glfw/archive/refs/heads/mjy9088-patch-1.tar.gz",
-            .hash = "glfw-0.0.0-R5AeUusHGgAImLWzn5DqfWuZmDO9105MieG9NcKtFY_p",
+            .hash = "glfw-0.0.0-R5AeUpoHGgBKdZ1yvUnvg_hkJRb9JuswHd00q1ZuZP99",
         },
     },
     .paths = .{

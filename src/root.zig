@@ -39,9 +39,6 @@ fn actual_entry() anyerror!void {
 
     _ = App.c.glfwSetKeyCallback(window, key_callback);
 
-    App.c.glfwMakeContextCurrent(window);
-    App.c.glfwSwapInterval(1);
-
     const allocator = std.heap.page_allocator;
     const app = try App.App.create(allocator, window);
     defer app.destroy();

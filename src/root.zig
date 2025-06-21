@@ -40,7 +40,7 @@ fn actual_entry() anyerror!void {
     _ = App.c.glfwSetKeyCallback(window, key_callback);
 
     const allocator = std.heap.page_allocator;
-    const app = try App.App.create(allocator, window);
+    const app = try App.create(allocator, window);
     defer app.destroy();
 
     while (App.c.glfwWindowShouldClose(window) == 0) {

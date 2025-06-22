@@ -6,18 +6,17 @@ pub const c = @cImport({
 const std = @import("std");
 const builtin = @import("builtin");
 
+window: ?*c.GLFWwindow,
 instance: c.VkInstance,
 validation: AppValidation,
 surface: c.VkSurfaceKHR,
 physicalDevice: c.VkPhysicalDevice,
 device: c.VkDevice,
-swapChain: c.VkSwapchainKHR,
-swapChainImages: []c.VkImage,
-swapChainImageFormat: c.VkFormat,
-swapChainExtent: c.VkExtent2D,
-swapChainImageViews: []c.VkImageView,
+swapChain: SwapChain,
 graphicsQueue: c.VkQueue,
 presentQueue: c.VkQueue,
+queueFamilyIndices: QueueFamilyIndices,
+swapChainSupportDetails: SwapChainSupportDetails,
 allocator: std.mem.Allocator,
 
 pub const CreationError = error{
@@ -36,6 +35,15 @@ pub const CreationError = error{
     Call_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
     Call_vkGetPhysicalDeviceSurfaceFormatsKHR,
     Call_vkGetPhysicalDeviceSurfacePresentModesKHR,
+} || SwapChainCreationError;
+pub const RenderError = error{
+    Call_vkQueueWaitIdle,
+    Call_vkAcquireNextImageKHR,
+    Call_vkQueuePresentKHR,
+} || SwapChainCreationError;
+
+pub const SwapChainCreationError = error{
+    OutOfMemory,
     Call_vkCreateSwapchainKHR,
     Call_vkGetSwapchainImagesKHR,
     Call_vkCreateImageView,
@@ -130,28 +138,24 @@ pub fn create(allocator: std.mem.Allocator, window: ?*c.GLFWwindow) CreationErro
     const device = try createLogicalDevice(allocator, physicalDevice);
     errdefer c.vkDestroyDevice(device, null);
     const swapChainSupportDetails = try SwapChainSupportDetails.create(allocator, physicalDevice.device, surface);
-    defer swapChainSupportDetails.destroy();
-    const swapChain = try createSwapChain(allocator, window, device, surface, &swapChainSupportDetails, physicalDevice.indices);
-    errdefer c.vkDestroySwapchainKHR(device, swapChain.swapChain, null);
-    errdefer allocator.free(swapChain.swapChainImages);
-    const swapChainImageViews = try createSwapChainImageViews(allocator, device, &swapChain);
+    const swapChain = try SwapChain.create(allocator, window, device, surface, &swapChainSupportDetails, physicalDevice.indices);
+    errdefer swapChain.destroy();
     var graphicsQueue: c.VkQueue = undefined;
     c.vkGetDeviceQueue(device, physicalDevice.indices.graphics, 0, &graphicsQueue);
     var presentQueue: c.VkQueue = undefined;
     c.vkGetDeviceQueue(device, physicalDevice.indices.present, 0, &presentQueue);
     return .{
+        .window = window,
         .instance = instance,
         .validation = validation,
         .surface = surface,
         .physicalDevice = physicalDevice.device,
         .device = device,
-        .swapChain = swapChain.swapChain,
-        .swapChainImages = swapChain.swapChainImages,
-        .swapChainImageFormat = swapChain.swapChainImageFormat,
-        .swapChainExtent = swapChain.swapChainExtent,
-        .swapChainImageViews = swapChainImageViews,
+        .swapChain = swapChain,
         .graphicsQueue = graphicsQueue,
         .presentQueue = presentQueue,
+        .queueFamilyIndices = physicalDevice.indices,
+        .swapChainSupportDetails = swapChainSupportDetails,
         .allocator = allocator,
     };
 }
@@ -206,9 +210,15 @@ fn createSurface(window: ?*c.GLFWwindow, instance: c.VkInstance) CreationError!c
     return result;
 }
 
-const QueueFamilyIndices = struct { graphics: u32, present: u32 };
-const PickPhysicalDeviceResult = struct { device: c.VkPhysicalDevice, indices: QueueFamilyIndices };
-const CreateSwapChainResult = struct { swapChain: c.VkSwapchainKHR, swapChainImages: []c.VkImage, swapChainImageFormat: c.VkFormat, swapChainExtent: c.VkExtent2D };
+const QueueFamilyIndices = struct {
+    graphics: u32,
+    present: u32,
+};
+const PickPhysicalDeviceResult = struct {
+    device: c.VkPhysicalDevice,
+    indices: QueueFamilyIndices,
+};
+
 const SwapChainSupportDetails = struct {
     allocator: std.mem.Allocator,
     capabilities: c.VkSurfaceCapabilitiesKHR,
@@ -247,6 +257,111 @@ const SwapChainSupportDetails = struct {
     fn destroy(self: SwapChainSupportDetails) void {
         self.allocator.free(self.formats);
         self.allocator.free(self.presentModes);
+    }
+};
+
+const SwapChain = struct {
+    allocator: std.mem.Allocator,
+    device: c.VkDevice,
+    swapChain: c.VkSwapchainKHR,
+    swapChainImages: []c.VkImage,
+    swapChainImageFormat: c.VkFormat,
+    swapChainExtent: c.VkExtent2D,
+    swapChainImageViews: []c.VkImageView,
+
+    fn create(allocator: std.mem.Allocator, window: ?*c.GLFWwindow, device: c.VkDevice, surface: c.VkSurfaceKHR, swapChainSupportDetails: *const SwapChainSupportDetails, indices: QueueFamilyIndices) SwapChainCreationError!SwapChain {
+        const surfaceFormat = chooseSwapSurfaceFormat(swapChainSupportDetails.formats);
+        const presentMode = chooseSwapPresentMode(swapChainSupportDetails.presentModes);
+        const extent = chooseSwapExtent(window, &swapChainSupportDetails.capabilities);
+        const imageCount = if (swapChainSupportDetails.capabilities.maxImageCount > 0 and swapChainSupportDetails.capabilities.minImageCount + 1 > swapChainSupportDetails.capabilities.maxImageCount) swapChainSupportDetails.capabilities.maxImageCount else swapChainSupportDetails.capabilities.minImageCount;
+
+        var swapChain: c.VkSwapchainKHR = undefined;
+        if (c.vkCreateSwapchainKHR(device, &.{
+            .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+            .surface = surface,
+            .minImageCount = imageCount,
+            .imageFormat = surfaceFormat.format,
+            .imageColorSpace = surfaceFormat.colorSpace,
+            .imageExtent = extent,
+            .imageArrayLayers = 1,
+            .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageSharingMode = if (indices.graphics != indices.present) c.VK_SHARING_MODE_CONCURRENT else c.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = if (indices.graphics != indices.present) 2 else 0,
+            .pQueueFamilyIndices = if (indices.graphics != indices.present) &[_]u32{ indices.graphics, indices.present } else null,
+            .preTransform = swapChainSupportDetails.capabilities.currentTransform,
+            .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+            .presentMode = presentMode,
+            .clipped = c.VK_TRUE,
+            .oldSwapchain = @ptrCast(c.VK_NULL_HANDLE),
+        }, null, &swapChain) != c.VK_SUCCESS) {
+            return SwapChainCreationError.Call_vkCreateSwapchainKHR;
+        }
+        errdefer c.vkDestroySwapchainKHR(device, swapChain, null);
+
+        var swapChainImageCount: u32 = undefined;
+        if (c.vkGetSwapchainImagesKHR(device, swapChain, &swapChainImageCount, null) != c.VK_SUCCESS) {
+            return SwapChainCreationError.Call_vkGetSwapchainImagesKHR;
+        }
+        const swapChainImages = try allocator.alloc(c.VkImage, swapChainImageCount);
+        errdefer allocator.free(swapChainImages);
+        if (c.vkGetSwapchainImagesKHR(device, swapChain, &swapChainImageCount, swapChainImages.ptr) != c.VK_SUCCESS) {
+            return SwapChainCreationError.Call_vkGetSwapchainImagesKHR;
+        }
+        // for (swapChainImages) |image| {
+        // TODO: vkCmdPipelineBarrier
+        // }
+
+        var initializedCount: usize = 0;
+        const swapChainImageViews = try allocator.alloc(c.VkImageView, swapChainImages.len);
+        errdefer {
+            for (0..initializedCount) |i| {
+                c.vkDestroyImageView(device, swapChainImageViews[i], null);
+            }
+            allocator.free(swapChainImageViews);
+        }
+        for (swapChainImages) |image| {
+            if (c.vkCreateImageView(device, &.{
+                .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                .image = image,
+                .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+                .format = surfaceFormat.format,
+                .components = .{
+                    .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .subresourceRange = .{
+                    .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            }, null, &swapChainImageViews[initializedCount]) != c.VK_SUCCESS) {
+                return SwapChainCreationError.Call_vkCreateImageView;
+            }
+            initializedCount += 1;
+        }
+
+        return .{
+            .allocator = allocator,
+            .device = device,
+            .swapChain = swapChain,
+            .swapChainImages = swapChainImages,
+            .swapChainImageFormat = surfaceFormat.format,
+            .swapChainExtent = extent,
+            .swapChainImageViews = swapChainImageViews,
+        };
+    }
+
+    fn destroy(self: SwapChain) void {
+        for (self.swapChainImageViews) |view| {
+            c.vkDestroyImageView(self.device, view, null);
+        }
+        self.allocator.free(self.swapChainImageViews);
+        self.allocator.free(self.swapChainImages);
+        c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
     }
 };
 
@@ -385,92 +500,6 @@ fn chooseSwapExtent(window: ?*c.GLFWwindow, capabilities: *const c.VkSurfaceCapa
     }
 }
 
-fn createSwapChain(allocator: std.mem.Allocator, window: ?*c.GLFWwindow, device: c.VkDevice, surface: c.VkSurfaceKHR, swapChainSupportDetails: *const SwapChainSupportDetails, indices: QueueFamilyIndices) CreationError!CreateSwapChainResult {
-    const surfaceFormat = chooseSwapSurfaceFormat(swapChainSupportDetails.formats);
-    const presentMode = chooseSwapPresentMode(swapChainSupportDetails.presentModes);
-    const extent = chooseSwapExtent(window, &swapChainSupportDetails.capabilities);
-    const imageCount = if (swapChainSupportDetails.capabilities.maxImageCount > 0 and swapChainSupportDetails.capabilities.minImageCount + 1 > swapChainSupportDetails.capabilities.maxImageCount) swapChainSupportDetails.capabilities.maxImageCount else swapChainSupportDetails.capabilities.minImageCount;
-
-    const createInfo: c.VkSwapchainCreateInfoKHR = .{
-        .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .surface = surface,
-        .minImageCount = imageCount,
-        .imageFormat = surfaceFormat.format,
-        .imageColorSpace = surfaceFormat.colorSpace,
-        .imageExtent = extent,
-        .imageArrayLayers = 1,
-        .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        .imageSharingMode = if (indices.graphics != indices.present) c.VK_SHARING_MODE_CONCURRENT else c.VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = if (indices.graphics != indices.present) 2 else 0,
-        .pQueueFamilyIndices = if (indices.graphics != indices.present) &[_]u32{ indices.graphics, indices.present } else null,
-        .preTransform = swapChainSupportDetails.capabilities.currentTransform,
-        .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode = presentMode,
-        .clipped = c.VK_TRUE,
-        .oldSwapchain = @ptrCast(c.VK_NULL_HANDLE),
-    };
-    var swapChain: c.VkSwapchainKHR = undefined;
-    if (c.vkCreateSwapchainKHR(device, &createInfo, null, &swapChain) != c.VK_SUCCESS) {
-        return CreationError.Call_vkCreateSwapchainKHR;
-    }
-    errdefer c.vkDestroySwapchainKHR(device, swapChain, null);
-
-    var swapChainImageCount: u32 = undefined;
-    if (c.vkGetSwapchainImagesKHR(device, swapChain, &swapChainImageCount, null) != c.VK_SUCCESS) {
-        return CreationError.Call_vkGetSwapchainImagesKHR;
-    }
-    const swapChainImages = try allocator.alloc(c.VkImage, swapChainImageCount);
-    errdefer allocator.free(swapChainImages);
-    if (c.vkGetSwapchainImagesKHR(device, swapChain, &swapChainImageCount, swapChainImages.ptr) != c.VK_SUCCESS) {
-        return CreationError.Call_vkGetSwapchainImagesKHR;
-    }
-
-    return .{
-        .swapChain = swapChain,
-        .swapChainImages = swapChainImages,
-        .swapChainImageFormat = surfaceFormat.format,
-        .swapChainExtent = extent,
-    };
-}
-
-fn createSwapChainImageViews(allocator: std.mem.Allocator, device: c.VkDevice, swapChain: *const CreateSwapChainResult) CreationError![]c.VkImageView {
-    var initializedCount: usize = 0;
-    const result = try allocator.alloc(c.VkImageView, swapChain.swapChainImages.len);
-    errdefer {
-        for (0..initializedCount) |i| {
-            c.vkDestroyImageView(device, result[i], null);
-        }
-        allocator.free(result);
-    }
-    for (swapChain.swapChainImages) |image| {
-        const createInfo: c.VkImageViewCreateInfo = .{
-            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = image,
-            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-            .format = swapChain.swapChainImageFormat,
-            .components = .{
-                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            .subresourceRange = .{
-                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-
-        if (c.vkCreateImageView(device, &createInfo, null, &result[initializedCount]) != c.VK_SUCCESS) {
-            return CreationError.Call_vkCreateImageView;
-        }
-        initializedCount += 1;
-    }
-    return result;
-}
-
 fn createLogicalDevice(allocator: std.mem.Allocator, physicalDevice: PickPhysicalDeviceResult) CreationError!c.VkDevice {
     var queueCreateInfos = std.ArrayList(c.VkDeviceQueueCreateInfo).init(allocator);
     defer queueCreateInfos.deinit();
@@ -514,13 +543,56 @@ fn createLogicalDevice(allocator: std.mem.Allocator, physicalDevice: PickPhysica
     return result;
 }
 
+// pub fn render(self: *@This()) RenderError!void {
+//     if (c.vkQueueWaitIdle(self.graphicsQueue) != c.VK_SUCCESS) {
+//         return RenderError.Call_vkQueueWaitIdle;
+//     }
+
+//     var imageIndex: u32 = undefined;
+//     if (c.vkAcquireNextImageKHR(
+//         self.device,
+//         self.swapChain.swapChain,
+//         18_446_744_073_709_551_615,
+//         null, // TODO: add semaphore
+//         null,
+//         &imageIndex,
+//     ) != c.VK_SUCCESS) {
+//         return RenderError.Call_vkAcquireNextImageKHR;
+//     }
+
+//     var queuePresentResult: c_int = c.vkQueuePresentKHR(self.graphicsQueue, &.{
+//         .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+//         .swapchainCount = 1,
+//         .pSwapchains = &self.swapChain.swapChain,
+//         .pImageIndices = &imageIndex,
+//     });
+//     if (queuePresentResult != c.VK_SUCCESS) {
+//         if (queuePresentResult == c.VK_ERROR_OUT_OF_DATE_KHR) {
+//             self.swapChain.destroy();
+//             self.swapChain = try SwapChain.create(
+//                 self.allocator,
+//                 self.window,
+//                 self.device,
+//                 self.surface,
+//                 &self.swapChainSupportDetails,
+//                 self.queueFamilyIndices,
+//             );
+//             queuePresentResult = c.vkQueuePresentKHR(self.graphicsQueue, &.{
+//                 .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+//                 .swapchainCount = 1,
+//                 .pSwapchains = &self.swapChain.swapChain,
+//                 .pImageIndices = &imageIndex,
+//             });
+//         }
+//         if (queuePresentResult != c.VK_SUCCESS and queuePresentResult != c.VK_SUBOPTIMAL_KHR) {
+//             return RenderError.Call_vkQueuePresentKHR;
+//         }
+//     }
+// }
+
 pub fn destroy(self: @This()) void {
-    for (self.swapChainImageViews) |view| {
-        c.vkDestroyImageView(self.device, view, null);
-    }
-    self.allocator.free(self.swapChainImageViews);
-    self.allocator.free(self.swapChainImages);
-    c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
+    self.swapChainSupportDetails.destroy();
+    self.swapChain.destroy();
     c.vkDestroyDevice(self.device, null);
     c.vkDestroySurfaceKHR(self.instance, self.surface, null);
     self.validation.destroy(self.instance);
